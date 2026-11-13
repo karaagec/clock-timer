@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>時計タイマー</title>
+<meta name="description" content="上段に現在時刻、下段にタイマーを大きく表示します。秒は細いバーで表します。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="時計タイマー">
+<meta property="og:description" content="上段に現在時刻、下段にタイマーを大きく表示します。秒は細いバーで表します。">
+<meta property="og:url" content="https://karaagec.github.io/clock-timer/">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap">
+<style>
+/* Layout: two stacked halves. Clock above, countdown below, one hairline between.
+   Controls float at the bottom and fade out when the pointer is idle.
+   Digits sit in fixed-width cells so a changing number never moves its neighbours. */
+:root {
+  --bg: #e5e7e9;
+  --fg: #2e3944;
+  --fg-soft: #56626d;
+  --rule: #cdd1d5;
+  --ctl-bg: #eef0f1;
+  --ctl-hover: #dde0e3;
+  --ctl-line: #b9bfc5;
+  --accent: #3f6677;
+  --accent-hover: #35596a;
+  --accent-ink: #f2f5f6;
+  --done: #9a5a3c;
+  --font: "Inter", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", Meiryo, system-ui, sans-serif;
+  color-scheme: light;
+}
+
+html, body { height: 100%; }
+body {
+  margin: 0;
+  box-sizing: border-box;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  overflow: hidden;
+}
+body.idle { cursor: none; }
+
+.stage {
+  height: 100%;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+}
+
+.half {
+  position: relative;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.4vh;
+}
+.half.timer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 8%;
+  right: 8%;
+  border-top: 1px solid var(--rule);
+}
+
+.label {
+  min-height: 1.4em;
+  font-size: clamp(12px, 2vh, 19px);
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  color: var(--fg-soft);
+  white-space: nowrap;
+}
+
+.digits {
+  display: flex;
+  justify-content: center;
+  font-family: var(--font);
+  font-weight: 300;
+  /* Clock and timer share one size, set so the widest timer text (24:00:00) still fits. */
+  font-size: min(calc(78vw / 4.48), 34vh);
+  line-height: 1.05;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  contain: layout style;
+  user-select: none;
+  visibility: hidden;
+}
+body.ready .digits { visibility: visible; }
+.digits > span { display: block; flex: none; width: 0.64em; text-align: center; }
+.digits > span.sep { width: 0.32em; }
+
+/* Seconds are shown only as a thin bar under the time, as wide as the digits. */
+.face { display: flex; flex-direction: column; width: fit-content; gap: 1.6vh; }
+.secbar {
+  height: clamp(3px, 0.55vh, 6px);
+  border-radius: 999px;
+  background: var(--rule);
+  overflow: hidden;
+  visibility: hidden;
+}
+body.ready .secbar { visibility: visible; }
+.secfill {
+  height: 100%;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left center;
+  will-change: transform;
+}
+
+.timer .digits { color: var(--fg-soft); }
+.timer[data-state="running"] .digits { color: var(--fg); font-weight: 400; }
+.timer[data-state="done"] .digits { color: var(--done); font-weight: 400; }
+/* The countdown bar is grey while idle or paused and takes the accent only while running. */
+.timer .secfill { background: var(--fg-soft); }
+.timer[data-state="running"] .secfill { background: var(--accent); }
+
+/* Controls */
+.bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding-top: 28px;
+  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px 20px;
+  background: linear-gradient(to top, var(--bg) 66%, transparent);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.35s ease, visibility 0s linear 0.35s;
+}
+.bar.show {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.2s ease;
+}
+.group { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; min-width: 0; }
+
+button, .field {
+  font: 500 clamp(13px, 1.7vh, 15px)/1 var(--font);
+  color: var(--fg);
+  background: var(--ctl-bg);
+  border: 1px solid var(--ctl-line);
+  border-radius: 6px;
+  padding: 0 13px;
+  min-height: 38px;
+}
+button { cursor: pointer; }
+button:hover { background: var(--ctl-hover); }
+button:focus-visible, .field:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary {
+  min-width: 6.5em;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+button.primary:hover { background: var(--accent-hover); }
+.field { width: 9em; text-align: center; font-weight: 400; }
+.field::placeholder { color: var(--fg-soft); opacity: 1; }
+.field[aria-invalid="true"] { border-color: var(--done); }
+.hint {
+  flex-basis: 100%;
+  margin: 0;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: var(--fg-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar, .bar.show { transition: none; }
+}
+[hidden] { display: none !important; }
+</style>
+</head>
+<body><main class="stage">
+  <section class="half clock" aria-label="現在時刻">
+    <div class="label" id="dateLabel"></div>
+    <div class="face">
+      <div class="digits" id="clock" aria-hidden="true"></div>
+      <div class="secbar" aria-hidden="true"><div class="secfill" id="secfill"></div></div>
+    </div>
+  </section>
+
+  <section class="half timer" id="timerSection" data-state="idle" aria-label="タイマー">
+    <div class="label" id="stateLabel">タイマー</div>
+    <div class="face">
+      <div class="digits" id="timer" aria-hidden="true"></div>
+      <div class="secbar" aria-hidden="true"><div class="secfill" id="timerfill"></div></div>
+    </div>
+  </section>
+</main>
+
+<div class="bar" id="bar">
+  <div class="group" role="group" aria-label="時間をセット">
+    <button type="button" data-min="5">5分</button>
+    <button type="button" data-min="10">10分</button>
+    <button type="button" data-min="15">15分</button>
+    <button type="button" data-min="25">25分</button>
+    <button type="button" data-min="30">30分</button>
+    <button type="button" data-min="60">60分</button>
+    <input class="field" id="custom" type="text" inputmode="text" autocomplete="off" placeholder="分 / 分:秒" aria-label="時間を入力（分、または 分:秒）">
+  </div>
+  <div class="group" role="group" aria-label="時間を調整">
+    <button type="button" id="minus">−1分</button>
+    <button type="button" id="plus">+1分</button>
+  </div>
+  <div class="group" role="group" aria-label="操作">
+    <button type="button" class="primary" id="toggle">開始</button>
+    <button type="button" id="reset">リセット</button>
+  </div>
+  <div class="group" role="group" aria-label="表示と音">
+    <button type="button" id="mute" aria-pressed="false">音 オン</button>
+    <button type="button" id="full">全画面</button>
+  </div>
+  <p class="hint" id="hint"></p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  document.documentElement.lang = 'ja';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var clockEl = $('clock'), timerEl = $('timer'), dateEl = $('dateLabel'), stateEl = $('stateLabel');
+  var timerSec = $('timerSection'), toggleBtn = $('toggle'), muteBtn = $('mute'), fullBtn = $('full');
+  var bar = $('bar'), custom = $('custom'), hint = $('hint');
+
+  var KEY = 'clocktimer.v1';
+  var MAX = 24 * 3600 * 1000;
+  var DEF = { duration: 25 * 60000, mode: 'idle', remaining: 25 * 60000, endAt: 0, mute: false };
+  var STATE_LABEL = { idle: 'タイマー', running: '残り時間', paused: '一時停止中', done: '終了しました' };
+  var TOGGLE_LABEL = { idle: '開始', running: '一時停止', paused: '再開', done: 'もう一度' };
+
+  function clamp(ms) { return Math.max(1000, Math.min(MAX, Math.round(ms / 1000) * 1000)); }
+  function p2(n) { return (n < 10 ? '0' : '') + n; }
+
+  /* ---------- state ---------- */
+  var st = load();
+  function load() {
+    var s = {};
+    try {
+      var r = JSON.parse(localStorage.getItem(KEY));
+      if (r && typeof r === 'object') s = r;
+    } catch (e) {}
+    var o = {};
+    for (var k in DEF) o[k] = DEF[k];
+    for (var k2 in s) if (k2 in DEF) o[k2] = s[k2];
+    if (['idle', 'running', 'paused', 'done'].indexOf(o.mode) < 0) o.mode = 'idle';
+    o.duration = clamp(+o.duration || DEF.duration);
+    o.remaining = Math.max(0, Math.min(MAX, +o.remaining || 0));
+    o.endAt = +o.endAt || 0;
+    o.mute = !!o.mute;
+    if (o.mode === 'running' && o.endAt <= Date.now()) { o.mode = 'done'; o.remaining = 0; }
+    if (o.mode === 'idle' && o.remaining <= 0) o.remaining = o.duration;
+    return o;
+  }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(st)); } catch (e) {} }
+  function left() { return st.mode === 'running' ? Math.max(0, st.endAt - Date.now()) : st.remaining; }
+
+  function start() {
+    unlockAudio();
+    if (st.mode === 'running') return;
+    if (st.mode === 'done' || st.remaining <= 0) st.remaining = st.duration;
+    st.endAt = Date.now() + st.remaining;
+    st.mode = 'running';
+    commit();
+  }
+  function pause() {
+    if (st.mode !== 'running') return;
+    st.remaining = left();
+    st.mode = 'paused';
+    commit();
+  }
+  function toggle() { if (st.mode === 'running') pause(); else start(); }
+  function reset() { st.mode = 'idle'; st.remaining = st.duration; commit(); }
+  function setDuration(ms) { st.duration = clamp(ms); st.remaining = st.duration; st.mode = 'idle'; commit(); }
+  function adjust(d) {
+    if (st.mode === 'running') {
+      var now = Date.now();
+      st.endAt = Math.min(now + MAX, st.endAt + d);
+      if (st.endAt < now + 1000) st.endAt = now + 1000;
+    } else if (st.mode === 'done') {
+      if (d <= 0) return;
+      st.remaining = clamp(d);
+      st.mode = 'paused';
+    } else {
+      st.remaining = clamp(st.remaining + d);
+      if (st.mode === 'idle') st.duration = st.remaining;
+    }
+    commit();
+  }
+  function commit() { save(); paint(); schedule(); }
+
+  /* ---------- rendering: only changed digits are touched ---------- */
+  function fmt(min) { return p2(Math.floor(min / 60)) + ':' + p2(min % 60); }
+  function render(el, str) {
+    var prev = el._s;
+    if (prev === str) return;
+    if (!prev || prev.length !== str.length) {
+      el.textContent = '';
+      for (var i = 0; i < str.length; i++) {
+        var s = document.createElement('span');
+        if (str[i] === ':') s.className = 'sep';
+        s.textContent = str[i];
+        el.appendChild(s);
+      }
+    } else {
+      var kids = el.children;
+      for (var j = 0; j < str.length; j++) if (prev[j] !== str[j]) kids[j].textContent = str[j];
+    }
+    el._s = str;
+  }
+
+  var dateFmt = new Intl.DateTimeFormat('ja-JP', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
+  var lastDay = -1, lastMode = '', lastMute = null, lastMinute = -1;
+
+  /* Seconds bar: one 60 s animation running on the compositor, re-aligned to the wall clock
+     at every minute change and whenever it drifts (sleep, throttled tab). No per-second redraw. */
+  var secFill = $('secfill'), barAnim = null;
+  var reduceMotion = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+  function syncBar(pos) {
+    if (!secFill.animate) { secFill.style.transform = 'scaleX(' + (pos / 60000).toFixed(4) + ')'; return; }
+    if (!barAnim) {
+      barAnim = secFill.animate(
+        [{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }],
+        { duration: 60000, easing: reduceMotion ? 'steps(60, end)' : 'linear', fill: 'forwards' }
+      );
+    } else if (barAnim.playState !== 'running') {
+      barAnim.play();
+    }
+    barAnim.currentTime = pos;
+  }
+
+  /* Countdown bar: the time left until the minute digit drops by one, shrinking from full to empty.
+     While running it is one compositor animation, re-created whenever it drifts from the real remaining time. */
+  var timerFill = $('timerfill'), tAnim = null, tFrom = 0, tStatic = '';
+  function setTimerBar(running, f) {
+    if (!running || !timerFill.animate) {
+      if (tAnim) { tAnim.cancel(); tAnim = null; }
+      var s = 'scaleX(' + f.toFixed(4) + ')';
+      if (s !== tStatic) { tStatic = s; timerFill.style.transform = s; }
+      return;
+    }
+    if (tAnim) {
+      if (Math.abs(tFrom - (tAnim.currentTime || 0) / 60000 - f) <= 0.01) return;
+      tAnim.cancel();
+    }
+    tFrom = f;
+    tAnim = timerFill.animate(
+      [{ transform: 'scaleX(' + f.toFixed(4) + ')' }, { transform: 'scaleX(0)' }],
+      { duration: Math.max(1, f * 60000), easing: reduceMotion ? 'steps(' + Math.max(1, Math.round(f * 60)) + ', end)' : 'linear', fill: 'forwards' }
+    );
+  }
+
+  function paint() {
+    var d = new Date();
+    render(clockEl, p2(d.getHours()) + ':' + p2(d.getMinutes()));
+    var pos = d.getSeconds() * 1000 + d.getMilliseconds();
+    var mk = d.getHours() * 60 + d.getMinutes();
+    if (mk !== lastMinute) { lastMinute = mk; syncBar(pos); }
+    else if (barAnim && Math.abs((barAnim.currentTime || 0) - pos) > 600) syncBar(pos);
+    var dk = d.getFullYear() * 10000 + d.getMonth() * 100 + d.getDate();
+    if (dk !== lastDay) { lastDay = dk; dateEl.textContent = dateFmt.format(d); }
+
+    var l = left(), mins = Math.ceil(l / 60000);
+    render(timerEl, fmt(mins));
+    setTimerBar(st.mode === 'running', l > 0 ? (l - (mins - 1) * 60000) / 60000 : 0);
+    if (st.mode !== lastMode) {
+      lastMode = st.mode;
+      timerSec.setAttribute('data-state', st.mode);
+      stateEl.textContent = STATE_LABEL[st.mode];
+      toggleBtn.textContent = TOGGLE_LABEL[st.mode];
+    }
+    if (st.mute !== lastMute) {
+      lastMute = st.mute;
+      muteBtn.textContent = st.mute ? '音 オフ' : '音 オン';
+      muteBtn.setAttribute('aria-pressed', st.mute ? 'true' : 'false');
+    }
+  }
+
+  /* ---------- scheduling: wake only when a displayed value changes ---------- */
+  var timeoutId = 0;
+  function tick() {
+    if (st.mode === 'running' && Date.now() >= st.endAt) {
+      st.mode = 'done';
+      st.remaining = 0;
+      save();
+      chime();
+    }
+    paint();
+    schedule();
+  }
+  function schedule() {
+    clearTimeout(timeoutId);
+    var now = Date.now();
+    // Wake when the clock's minute changes, but at most every 15 s so the bars are re-checked against the real time.
+    var wait = Math.min(60000 - (now % 60000), 15000);
+    if (st.mode === 'running') {
+      var l = st.endAt - now;
+      // The countdown's minute digit changes each time l crosses a multiple of 60 s; the last wake lands on 0.
+      var w2 = l <= 0 ? 0 : (l % 60000 || 60000);
+      if (w2 < wait) wait = w2;
+    }
+    timeoutId = setTimeout(tick, Math.max(20, wait + 8));
+  }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) tick(); });
+
+  /* ---------- sound ---------- */
+  var ac = null;
+  function unlockAudio() {
+    try {
+      if (!ac) { var C = window.AudioContext || window.webkitAudioContext; if (C) ac = new C(); }
+      if (ac && ac.state === 'suspended') ac.resume();
+    } catch (e) {}
+  }
+  function chime() {
+    if (st.mute || !ac) return;
+    try {
+      var t0 = ac.currentTime + 0.03;
+      [0, 0.3, 0.6].forEach(function (o) {
+        var osc = ac.createOscillator(), g = ac.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = 880;
+        g.gain.setValueAtTime(0.0001, t0 + o);
+        g.gain.exponentialRampToValueAtTime(0.16, t0 + o + 0.03);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + o + 0.26);
+        osc.connect(g);
+        g.connect(ac.destination);
+        osc.start(t0 + o);
+        osc.stop(t0 + o + 0.3);
+      });
+    } catch (e) {}
+  }
+  function toggleMute() { st.mute = !st.mute; save(); paint(); }
+
+  /* ---------- input ---------- */
+  function parseInput(raw) {
+    var s = String(raw).trim()
+      .replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); })
+      .replace(/：/g, ':').replace(/\s+/g, '');
+    var m;
+    if ((m = s.match(/^(\d+):(\d{1,2})$/))) return (+m[1] * 60 + +m[2]) * 1000;
+    if ((m = s.match(/^(\d+)秒$/))) return +m[1] * 1000;
+    if ((m = s.match(/^(\d+)分(?:(\d+)秒)?$/))) return (+m[1] * 60 + +(m[2] || 0)) * 1000;
+    if ((m = s.match(/^(\d+)$/))) return +m[1] * 60000;
+    return 0;
+  }
+  function applyCustom() {
+    var ms = parseInput(custom.value);
+    if (ms <= 0) { custom.setAttribute('aria-invalid', 'true'); return; }
+    custom.removeAttribute('aria-invalid');
+    custom.value = '';
+    custom.blur();
+    setDuration(ms);
+  }
+  custom.addEventListener('input', function () { custom.removeAttribute('aria-invalid'); });
+
+  function toggleFull() {
+    try {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else {
+        var r = document.documentElement.requestFullscreen();
+        if (r && r.catch) r.catch(function () {});
+      }
+    } catch (e) {}
+  }
+  function paintFull() { fullBtn.textContent = document.fullscreenElement ? '全画面を終了' : '全画面'; }
+  document.addEventListener('fullscreenchange', paintFull);
+  if (!document.fullscreenEnabled) fullBtn.hidden = true;
+  hint.textContent = 'Space 開始・一時停止　R リセット　↑↓ ±1分　M 音　' + (document.fullscreenEnabled ? 'F 全画面' : 'F11 全画面');
+
+  bar.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.min) setDuration(+b.dataset.min * 60000);
+    else if (b.id === 'toggle') toggle();
+    else if (b.id === 'reset') reset();
+    else if (b.id === 'minus') adjust(-60000);
+    else if (b.id === 'plus') adjust(60000);
+    else if (b.id === 'mute') toggleMute();
+    else if (b.id === 'full') toggleFull();
+    if (e.detail > 0) b.blur();
+  });
+
+  document.addEventListener('keydown', function (e) {
+    wake();
+    if (e.target === custom) {
+      if (e.key === 'Enter') { e.preventDefault(); applyCustom(); }
+      else if (e.key === 'Escape') custom.blur();
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.tagName === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;
+    switch (e.key) {
+      case ' ': e.preventDefault(); toggle(); break;
+      case 'r': case 'R': reset(); break;
+      case 'm': case 'M': toggleMute(); break;
+      case 'f': case 'F': if (document.fullscreenEnabled) toggleFull(); break;
+      case 'ArrowUp': e.preventDefault(); adjust(60000); break;
+      case 'ArrowDown': e.preventDefault(); adjust(-60000); break;
+    }
+  });
+
+  /* ---------- controls fade out when idle ---------- */
+  var hideTimer = 0;
+  function wake() {
+    bar.classList.add('show');
+    document.body.classList.remove('idle');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(maybeHide, 3500);
+  }
+  function maybeHide() {
+    if (bar.matches(':hover') || document.activeElement === custom) { hideTimer = setTimeout(maybeHide, 3500); return; }
+    bar.classList.remove('show');
+    document.body.classList.add('idle');
+  }
+  ['pointermove', 'pointerdown', 'touchstart'].forEach(function (t) {
+    document.addEventListener(t, wake, { passive: true });
+  });
+
+  /* ---------- start ---------- */
+  paint();
+  paintFull();
+  schedule();
+  wake();
+  var reveal = function () { document.body.classList.add('ready'); };
+  var fontWait = (document.fonts && document.fonts.load)
+    ? document.fonts.load('300 64px Inter', '0123456789:').catch(function () {})
+    : Promise.resolve();
+  Promise.race([fontWait, new Promise(function (r) { setTimeout(r, 1500); })]).then(reveal);
+})();
+</script>
+</body>
+</html>
